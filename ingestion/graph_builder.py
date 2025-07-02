@@ -427,7 +427,7 @@ async def main():
     """
     
     # Chunk the document
-    chunks = chunker.chunk_document(
+    chunks = await chunker.chunk_document(
         content=sample_text,
         title="AI Company Developments",
         source="example.md"

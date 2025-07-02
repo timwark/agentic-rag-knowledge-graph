@@ -5,7 +5,7 @@ Semantic chunking implementation for intelligent document splitting.
 import os
 import re
 import logging
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Union
 from dataclasses import dataclass
 import asyncio
 
@@ -58,6 +58,7 @@ class DocumentChunk:
     end_char: int
     metadata: Dict[str, Any]
     token_count: Optional[int] = None
+    embedding: Optional[List[float]] = None
     
     def __post_init__(self):
         """Calculate token count if not provided."""
@@ -350,7 +351,7 @@ class SimpleChunker:
         """Initialize simple chunker."""
         self.config = config
     
-    def chunk_document(
+    async def chunk_document(
         self,
         content: str,
         title: str,
@@ -450,7 +451,7 @@ class SimpleChunker:
 
 
 # Factory function
-def create_chunker(config: ChunkingConfig):
+def create_chunker(config: ChunkingConfig) -> Union[SemanticChunker, SimpleChunker]:
     """
     Create appropriate chunker based on configuration.
     
