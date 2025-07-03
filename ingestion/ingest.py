@@ -8,7 +8,7 @@ import logging
 import json
 import glob
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Callable
 from datetime import datetime
 import argparse
 
@@ -23,7 +23,7 @@ from .graph_builder import create_graph_builder
 try:
     from ..agent.db_utils import initialize_database, close_database, db_pool
     from ..agent.graph_utils import initialize_graph, close_graph
-    from ..agent.models import IngestionConfig, IngestionResult
+    from ..agent.models import IngestionConfig, IngestionResult, IngestionMode
 except ImportError:
     # For direct execution or testing
     import sys
@@ -31,7 +31,7 @@ except ImportError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from agent.db_utils import initialize_database, close_database, db_pool
     from agent.graph_utils import initialize_graph, close_graph
-    from agent.models import IngestionConfig, IngestionResult
+    from agent.models import IngestionConfig, IngestionResult, IngestionMode
 
 # Load environment variables
 load_dotenv()
@@ -99,7 +99,7 @@ class DocumentIngestionPipeline:
     
     async def ingest_documents(
         self,
-        progress_callback: Optional[callable] = None
+        progress_callback: Optional[Callable[[int, int], None]] = None
     ) -> List[IngestionResult]:
         """
         Ingest all documents from the documents folder.
@@ -200,44 +200,39 @@ class DocumentIngestionPipeline:
                 errors=["No chunks created"]
             )
         
-        logger.info(f"Created {len(chunks)} chunks")
-        
-        # Extract entities if configured
+        # Generate embeddings and save to PostgreSQL (unless graph_only mode)
+        document_id = ""
         entities_extracted = 0
-        if self.config.extract_entities:
-            chunks = await self.graph_builder.extract_entities_from_chunks(chunks)
-            entities_extracted = sum(
-                len(chunk.metadata.get("entities", {}).get("companies", [])) +
-                len(chunk.metadata.get("entities", {}).get("technologies", [])) +
-                len(chunk.metadata.get("entities", {}).get("people", []))
-                for chunk in chunks
-            )
-            logger.info(f"Extracted {entities_extracted} entities")
-        
-        # Generate embeddings
-        embedded_chunks = await self.embedder.embed_chunks(chunks)
-        logger.info(f"Generated embeddings for {len(embedded_chunks)} chunks")
-        
-        # Save to PostgreSQL
-        document_id = await self._save_to_postgres(
-            document_title,
-            document_source,
-            document_content,
-            embedded_chunks,
-            document_metadata
-        )
-        
-        logger.info(f"Saved document to PostgreSQL with ID: {document_id}")
-        
-        # Add to knowledge graph (if enabled)
         relationships_created = 0
         graph_errors = []
         
-        if not self.config.skip_graph_building:
+        if self.config.ingestion_mode in [IngestionMode.VECTOR_ONLY, IngestionMode.BOTH]:
+            try:
+                # Generate embeddings
+                embedded_chunks = await self.embedder.embed_chunks(chunks)
+                
+                # Save to PostgreSQL
+                document_id = await self._save_to_postgres(
+                    title=document_title,
+                    source=document_source,
+                    content=document_content,
+                    chunks=embedded_chunks,
+                    metadata=document_metadata
+                )
+                
+                logger.info(f"Saved {len(chunks)} chunks to vector database")
+                
+            except Exception as e:
+                error_msg = f"Failed to save to vector database: {str(e)}"
+                logger.error(error_msg)
+                graph_errors.append(error_msg)
+        
+        # Build knowledge graph (unless vector_only mode)
+        if self.config.ingestion_mode in [IngestionMode.GRAPH_ONLY, IngestionMode.BOTH]:
             try:
                 logger.info("Building knowledge graph relationships (this may take several minutes)...")
                 graph_result = await self.graph_builder.add_document_to_graph(
-                    chunks=embedded_chunks,
+                    chunks=chunks,  # Use original chunks for graph building
                     document_title=document_title,
                     document_source=document_source,
                     document_metadata=document_metadata
@@ -253,7 +248,7 @@ class DocumentIngestionPipeline:
                 logger.error(error_msg)
                 graph_errors.append(error_msg)
         else:
-            logger.info("Skipping knowledge graph building (skip_graph_building=True)")
+            logger.info("Skipping knowledge graph building (vector_only mode)")
         
         # Calculate processing time
         processing_time = (datetime.now() - start_time).total_seconds() * 1000
@@ -411,7 +406,9 @@ async def main():
     parser.add_argument("--chunk-overlap", type=int, default=200, help="Chunk overlap size")
     parser.add_argument("--no-semantic", action="store_true", help="Disable semantic chunking")
     parser.add_argument("--no-entities", action="store_true", help="Disable entity extraction")
-    parser.add_argument("--fast", "-f", action="store_true", help="Fast mode: skip knowledge graph building")
+    parser.add_argument("--fast", "-f", action="store_true", help="Fast mode: skip knowledge graph building (legacy)")
+    parser.add_argument("--ingestion-mode", choices=["vector_only", "graph_only", "both"], 
+                       default="both", help="Ingestion mode: vector_only, graph_only, or both")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
     
     args = parser.parse_args()
@@ -423,13 +420,21 @@ async def main():
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )
     
+    # Map ingestion mode
+    ingestion_mode_map = {
+        "vector_only": IngestionMode.VECTOR_ONLY,
+        "graph_only": IngestionMode.GRAPH_ONLY,
+        "both": IngestionMode.BOTH
+    }
+    
     # Create ingestion configuration
     config = IngestionConfig(
         chunk_size=args.chunk_size,
         chunk_overlap=args.chunk_overlap,
         use_semantic_chunking=not args.no_semantic,
         extract_entities=not args.no_entities,
-        skip_graph_building=args.fast
+        ingestion_mode=ingestion_mode_map[args.ingestion_mode],
+        skip_graph_building=args.fast  # Legacy support
     )
     
     # Create and run pipeline
@@ -454,6 +459,7 @@ async def main():
         print("\n" + "="*50)
         print("INGESTION SUMMARY")
         print("="*50)
+        print(f"Ingestion mode: {args.ingestion_mode}")
         print(f"Documents processed: {len(results)}")
         print(f"Total chunks created: {sum(r.chunks_created for r in results)}")
         print(f"Total entities extracted: {sum(r.entities_extracted for r in results)}")

@@ -23,6 +23,13 @@ class SearchType(str, Enum):
     GRAPH = "graph"
 
 
+class IngestionMode(str, Enum):
+    """Ingestion mode enumeration."""
+    VECTOR_ONLY = "vector_only"
+    GRAPH_ONLY = "graph_only"
+    BOTH = "both"
+
+
 # Request Models
 class ChatRequest(BaseModel):
     """Chat request model."""
@@ -208,7 +215,9 @@ class IngestionConfig(BaseModel):
     max_chunk_size: int = Field(default=2000, ge=500, le=10000)
     use_semantic_chunking: bool = True
     extract_entities: bool = True
-    # New option for faster ingestion
+    # New ingestion mode option
+    ingestion_mode: IngestionMode = Field(default=IngestionMode.BOTH, description="Ingestion mode: vector_only, graph_only, or both")
+    # Legacy option for backward compatibility
     skip_graph_building: bool = Field(default=False, description="Skip knowledge graph building for faster ingestion")
     
     @field_validator('chunk_overlap')
@@ -218,6 +227,17 @@ class IngestionConfig(BaseModel):
         chunk_size = info.data.get('chunk_size', 1000)
         if v >= chunk_size:
             raise ValueError(f"Chunk overlap ({v}) must be less than chunk size ({chunk_size})")
+        return v
+    
+    @field_validator('skip_graph_building', mode='before')
+    @classmethod
+    def set_skip_graph_building(cls, v: bool, info) -> bool:
+        """Set skip_graph_building based on ingestion_mode for backward compatibility."""
+        ingestion_mode = info.data.get('ingestion_mode', IngestionMode.BOTH)
+        if ingestion_mode == IngestionMode.VECTOR_ONLY:
+            return True
+        elif ingestion_mode == IngestionMode.GRAPH_ONLY:
+            return True  # Skip vector building for graph_only
         return v
 
 
