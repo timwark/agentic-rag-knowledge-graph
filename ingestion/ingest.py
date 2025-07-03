@@ -343,11 +343,12 @@ class DocumentIngestionPipeline:
                 # Insert document
                 document_result = await conn.fetchrow(
                     """
-                    INSERT INTO documents (title, source, content, metadata)
-                    VALUES ($1, $2, $3, $4)
+                    INSERT INTO enhanced_documents (title, filename, source, content, metadata)
+                    VALUES ($1, $2, $3, $4, $5)
                     RETURNING id::text
                     """,
                     title,
+                    os.path.basename(source),
                     source,
                     content,
                     json.dumps(metadata)
@@ -365,7 +366,7 @@ class DocumentIngestionPipeline:
                     
                     await conn.execute(
                         """
-                        INSERT INTO chunks (document_id, content, embedding, chunk_index, metadata, token_count)
+                        INSERT INTO enhanced_chunks (document_id, content, embedding, chunk_index, metadata, token_count)
                         VALUES ($1::uuid, $2, $3::vector, $4, $5, $6)
                         """,
                         document_id,
@@ -387,8 +388,8 @@ class DocumentIngestionPipeline:
             async with conn.transaction():
                 await conn.execute("DELETE FROM messages")
                 await conn.execute("DELETE FROM sessions")
-                await conn.execute("DELETE FROM chunks")
-                await conn.execute("DELETE FROM documents")
+                await conn.execute("DELETE FROM enhanced_chunks")
+                await conn.execute("DELETE FROM enhanced_documents")
         
         logger.info("Cleaned PostgreSQL database")
         
