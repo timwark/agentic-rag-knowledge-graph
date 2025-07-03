@@ -262,7 +262,7 @@ async def get_session_messages(
 # Document Management Functions
 async def get_document(document_id: str) -> Optional[Dict[str, Any]]:
     """
-    Get document by ID.
+    Get a document by ID.
     
     Args:
         document_id: Document UUID
