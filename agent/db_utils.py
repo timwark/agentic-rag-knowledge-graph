@@ -511,3 +511,280 @@ async def test_connection() -> bool:
     except Exception as e:
         logger.error(f"Database connection test failed: {e}")
         return False
+
+
+# Multi-Agent Support Functions
+async def ensure_agent_schema() -> None:
+    """Ensure agent registry and schema functions exist."""
+    try:
+        from .schema_manager import schema_manager
+        await schema_manager.create_agent_registry_table()
+    except Exception as e:
+        logger.error(f"Failed to ensure agent schema: {e}")
+        raise
+
+
+async def vector_search_agent(
+    agent_name: str,
+    embedding: List[float],
+    limit: int = 10
+) -> List[Dict[str, Any]]:
+    """
+    Perform vector search for a specific agent.
+    
+    Args:
+        agent_name: Agent name
+        embedding: Query embedding vector
+        limit: Maximum number of results
+    
+    Returns:
+        List of matching chunks ordered by similarity (best first)
+    """
+    from .schema_manager import schema_manager
+    
+    if not await schema_manager.agent_exists(agent_name):
+        raise ValueError(f"Agent {agent_name} does not exist")
+    
+    function_names = schema_manager.get_function_names(agent_name)
+    
+    async with db_pool.acquire() as conn:
+        # Convert embedding to PostgreSQL vector string format
+        embedding_str = '[' + ','.join(map(str, embedding)) + ']'
+        
+        results = await conn.fetch(
+            f"SELECT * FROM {function_names['match_chunks']}($1::vector, $2)",
+            embedding_str,
+            limit
+        )
+        
+        return [
+            {
+                "chunk_id": row["chunk_id"],
+                "document_id": row["document_id"],
+                "content": row["content"],
+                "score": row["similarity"],
+                "metadata": json.loads(row["metadata"]),
+                "document_title": row["document_title"],
+                "document_source": row["document_source"]
+            }
+            for row in results
+        ]
+
+
+async def hybrid_search_agent(
+    agent_name: str,
+    embedding: List[float],
+    query_text: str,
+    limit: int = 10,
+    text_weight: float = 0.3
+) -> List[Dict[str, Any]]:
+    """
+    Perform hybrid search for a specific agent.
+    
+    Args:
+        agent_name: Agent name
+        embedding: Query embedding vector
+        query_text: Query text for keyword search
+        limit: Maximum number of results
+        text_weight: Weight for text similarity (0-1)
+    
+    Returns:
+        List of matching chunks ordered by combined score (best first)
+    """
+    from .schema_manager import schema_manager
+    
+    if not await schema_manager.agent_exists(agent_name):
+        raise ValueError(f"Agent {agent_name} does not exist")
+    
+    function_names = schema_manager.get_function_names(agent_name)
+    
+    async with db_pool.acquire() as conn:
+        # Convert embedding to PostgreSQL vector string format
+        embedding_str = '[' + ','.join(map(str, embedding)) + ']'
+        
+        results = await conn.fetch(
+            f"SELECT * FROM {function_names['hybrid_search']}($1::vector, $2, $3, $4)",
+            embedding_str,
+            query_text,
+            limit,
+            text_weight
+        )
+        
+        return [
+            {
+                "chunk_id": row["chunk_id"],
+                "document_id": row["document_id"],
+                "content": row["content"],
+                "combined_score": row["combined_score"],
+                "vector_similarity": row["vector_similarity"],
+                "text_similarity": row["text_similarity"],
+                "metadata": json.loads(row["metadata"]),
+                "document_title": row["document_title"],
+                "document_source": row["document_source"]
+            }
+            for row in results
+        ]
+
+
+async def get_document_chunks_agent(
+    agent_name: str,
+    document_id: str
+) -> List[Dict[str, Any]]:
+    """
+    Get all chunks for a document for a specific agent.
+    
+    Args:
+        agent_name: Agent name
+        document_id: Document UUID
+    
+    Returns:
+        List of chunks ordered by chunk index
+    """
+    from .schema_manager import schema_manager
+    
+    if not await schema_manager.agent_exists(agent_name):
+        raise ValueError(f"Agent {agent_name} does not exist")
+    
+    function_names = schema_manager.get_function_names(agent_name)
+    
+    async with db_pool.acquire() as conn:
+        results = await conn.fetch(
+            f"SELECT * FROM {function_names['get_document_chunks']}($1::uuid)",
+            document_id
+        )
+        
+        return [
+            {
+                "chunk_id": row["chunk_id"],
+                "content": row["content"],
+                "chunk_index": row["chunk_index"],
+                "metadata": json.loads(row["metadata"])
+            }
+            for row in results
+        ]
+
+
+async def save_document_agent(
+    agent_name: str,
+    title: str,
+    source: str,
+    content: str,
+    metadata: Optional[Dict[str, Any]] = None
+) -> str:
+    """
+    Save a document for a specific agent.
+    
+    Args:
+        agent_name: Agent name
+        title: Document title
+        source: Document source path
+        content: Document content
+        metadata: Optional metadata
+    
+    Returns:
+        Document ID
+    """
+    from .schema_manager import schema_manager
+    
+    if not await schema_manager.agent_exists(agent_name):
+        raise ValueError(f"Agent {agent_name} does not exist")
+    
+    table_names = schema_manager.get_table_names(agent_name)
+    
+    async with db_pool.acquire() as conn:
+        result = await conn.fetchrow(
+            f"""
+            INSERT INTO {table_names['documents']} (title, source, content, metadata)
+            VALUES ($1, $2, $3, $4)
+            RETURNING id::text
+            """,
+            title,
+            source,
+            content,
+            json.dumps(metadata or {})
+        )
+        
+        return result["id"]
+
+
+async def save_chunk_agent(
+    agent_name: str,
+    document_id: str,
+    content: str,
+    embedding: Optional[List[float]] = None,
+    chunk_index: int = 0,
+    metadata: Optional[Dict[str, Any]] = None,
+    token_count: Optional[int] = None
+) -> str:
+    """
+    Save a chunk for a specific agent.
+    
+    Args:
+        agent_name: Agent name
+        document_id: Document ID
+        content: Chunk content
+        embedding: Optional embedding vector
+        chunk_index: Chunk index in document
+        metadata: Optional metadata
+        token_count: Optional token count
+    
+    Returns:
+        Chunk ID
+    """
+    from .schema_manager import schema_manager
+    
+    if not await schema_manager.agent_exists(agent_name):
+        raise ValueError(f"Agent {agent_name} does not exist")
+    
+    table_names = schema_manager.get_table_names(agent_name)
+    
+    async with db_pool.acquire() as conn:
+        # Convert embedding to PostgreSQL vector format if provided
+        embedding_str = None
+        if embedding:
+            embedding_str = '[' + ','.join(map(str, embedding)) + ']'
+        
+        result = await conn.fetchrow(
+            f"""
+            INSERT INTO {table_names['chunks']} 
+            (document_id, content, embedding, chunk_index, metadata, token_count)
+            VALUES ($1::uuid, $2, $3::vector, $4, $5, $6)
+            RETURNING id::text
+            """,
+            document_id,
+            content,
+            embedding_str,
+            chunk_index,
+            json.dumps(metadata or {}),
+            token_count
+        )
+        
+        return result["id"]
+
+
+async def clean_agent_data(agent_name: str) -> bool:
+    """
+    Clean all data for a specific agent.
+    
+    Args:
+        agent_name: Agent name
+    
+    Returns:
+        True if successful
+    """
+    from .schema_manager import schema_manager
+    return await schema_manager.clean_agent_data(agent_name)
+
+
+async def get_agent_stats(agent_name: str) -> Dict[str, int]:
+    """
+    Get statistics for a specific agent.
+    
+    Args:
+        agent_name: Agent name
+    
+    Returns:
+        Dictionary with statistics
+    """
+    from .schema_manager import schema_manager
+    return await schema_manager.get_agent_table_counts(agent_name)

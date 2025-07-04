@@ -185,9 +185,43 @@ class Message(BaseModel):
 
 
 # Agent Models
+class AgentConfig(BaseModel):
+    """Configuration for a specific agent."""
+    agent_name: str = Field(..., description="Unique agent identifier")
+    ingestion_folder: Optional[str] = Field(None, description="Default folder for document ingestion")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional agent metadata")
+    
+    @field_validator('agent_name')
+    @classmethod
+    def validate_agent_name(cls, v: str) -> str:
+        """Validate agent name format."""
+        import re
+        if not v:
+            raise ValueError("Agent name cannot be empty")
+        if not re.match(r'^[a-zA-Z0-9_]{1,50}$', v):
+            raise ValueError(
+                "Agent name must contain only alphanumeric characters and underscores, "
+                "and be 1-50 characters long"
+            )
+        return v
+
+
+class AgentInfo(BaseModel):
+    """Information about an agent."""
+    agent_name: str
+    table_prefix: str
+    ingestion_folder: Optional[str] = None
+    created_at: datetime
+    last_updated: datetime
+    document_count: int = 0
+    chunk_count: int = 0
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
 class AgentDependencies(BaseModel):
     """Dependencies for the agent."""
     session_id: str
+    agent_name: str = Field(default="main_agent", description="Agent name for vector store")
     database_url: Optional[str] = None
     neo4j_uri: Optional[str] = None
     openai_api_key: Optional[str] = None
@@ -195,11 +229,10 @@ class AgentDependencies(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
-
-
 class AgentContext(BaseModel):
     """Agent execution context."""
     session_id: str
+    agent_name: str = Field(default="main_agent", description="Agent name for vector store")
     messages: List[Message] = Field(default_factory=list)
     tool_calls: List[ToolCall] = Field(default_factory=list)
     search_results: List[ChunkResult] = Field(default_factory=list)
@@ -215,10 +248,27 @@ class IngestionConfig(BaseModel):
     max_chunk_size: int = Field(default=2000, ge=500, le=10000)
     use_semantic_chunking: bool = True
     extract_entities: bool = True
+    # Multi-agent support
+    agent_name: str = Field(default="main_agent", description="Agent name for vector store tables")
+    ingestion_folder: Optional[str] = Field(None, description="Folder to ingest documents from")
     # New ingestion mode option
     ingestion_mode: IngestionMode = Field(default=IngestionMode.BOTH, description="Ingestion mode: vector_only, graph_only, or both")
     # Legacy option for backward compatibility
     skip_graph_building: bool = Field(default=False, description="Skip knowledge graph building for faster ingestion")
+    
+    @field_validator('agent_name')
+    @classmethod
+    def validate_agent_name(cls, v: str) -> str:
+        """Validate agent name format."""
+        import re
+        if not v:
+            raise ValueError("Agent name cannot be empty")
+        if not re.match(r'^[a-zA-Z0-9_]{1,50}$', v):
+            raise ValueError(
+                "Agent name must contain only alphanumeric characters and underscores, "
+                "and be 1-50 characters long"
+            )
+        return v
     
     @field_validator('chunk_overlap')
     @classmethod

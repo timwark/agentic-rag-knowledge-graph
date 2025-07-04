@@ -109,7 +109,7 @@ class LlamaIndexIngestionPipeline:
         logger.info(f"LlamaIndex pipeline initialized for: {self.local_folder}")
     
     async def initialize(self):
-        """Initialize database connections."""
+        """Initialize database connections and agent schema."""
         if self._initialized:
             return
         
@@ -118,16 +118,33 @@ class LlamaIndexIngestionPipeline:
         # Initialize database connections
         await initialize_database()
         
+        # Ensure agent schema exists
+        try:
+            from ..agent.db_utils import ensure_agent_schema
+            from ..agent.schema_manager import schema_manager
+        except ImportError:
+            # For direct execution
+            from agent.db_utils import ensure_agent_schema
+            from agent.schema_manager import schema_manager
+        
+        await ensure_agent_schema()
+        
+        # Ensure the agent exists, creating it if necessary
+        await schema_manager.ensure_agent_exists(
+            self.config.agent_name, 
+            self.config.ingestion_folder
+        )
+        
         # Initialize graph if needed
         if self.config.ingestion_mode in [IngestionMode.GRAPH_ONLY, IngestionMode.BOTH]:
             await initialize_graph()
         
-        # Clean databases if requested
+        # Clean agent data if requested
         if self.clean_before_ingest:
-            await self._clean_databases()
+            await self._clean_agent_data()
         
         self._initialized = True
-        logger.info("LlamaIndex pipeline initialized successfully")
+        logger.info(f"LlamaIndex pipeline initialized successfully for agent: {self.config.agent_name}")
     
     async def close(self):
         """Close database connections."""
@@ -413,7 +430,7 @@ class LlamaIndexIngestionPipeline:
         nodes: List[BaseNode]
     ) -> str:
         """
-        Save document and chunks to PostgreSQL.
+        Save document and chunks to agent-specific PostgreSQL tables.
         
         Args:
             doc_path: Path to original document
@@ -423,48 +440,39 @@ class LlamaIndexIngestionPipeline:
         Returns:
             Document ID
         """
-        async with db_pool.acquire() as conn:
-            async with conn.transaction():
-                # Insert document
-                document_result = await conn.fetchrow(
-                    """
-                    INSERT INTO documents (title, source, content, metadata)
-                    VALUES ($1, $2, $3, $4)
-                    RETURNING id::text
-                    """,
-                    doc_path.name,
-                    str(doc_path),
-                    document.text,
-                    json.dumps(document.metadata)
-                )
-                
-                document_id = document_result["id"]
-                
-                # Insert chunks
-                for node in nodes:
-                    # Convert embedding to PostgreSQL vector format
-                    embedding_data = None
-                    if hasattr(node, 'embedding') and node.embedding:
-                        embedding_data = '[' + ','.join(map(str, node.embedding)) + ']'
-                    
-                    # Get text content from node
-                    node_text = node.get_content() if hasattr(node, 'get_content') else str(node)
-                    
-                    await conn.execute(
-                        """
-                        INSERT INTO chunks (document_id, content, embedding, chunk_index, metadata, token_count)
-                        VALUES ($1::uuid, $2, $3::vector, $4, $5, $6)
-                        """,
-                        document_id,
-                        node_text,
-                        embedding_data,
-                        node.metadata.get('chunk_index', 0),
-                        json.dumps(node.metadata),
-                        len(node_text.split())
-                    )
-                
-                logger.info(f"Saved document {doc_path.name} with {len(nodes)} chunks to PostgreSQL")
-                return document_id
+        try:
+            from ..agent.db_utils import save_document_agent, save_chunk_agent
+        except ImportError:
+            # For direct execution
+            from agent.db_utils import save_document_agent, save_chunk_agent
+        
+        # Save document to agent-specific table
+        document_id = await save_document_agent(
+            agent_name=self.config.agent_name,
+            title=doc_path.name,
+            source=str(doc_path),
+            content=document.text,
+            metadata=document.metadata
+        )
+        
+        # Save chunks to agent-specific table
+        for node in nodes:
+            # Get text content and embedding from node
+            node_text = node.get_content() if hasattr(node, 'get_content') else str(node)
+            embedding = getattr(node, 'embedding', None)
+            
+            await save_chunk_agent(
+                agent_name=self.config.agent_name,
+                document_id=document_id,
+                content=node_text,
+                embedding=embedding,
+                chunk_index=node.metadata.get('chunk_index', 0),
+                metadata=node.metadata,
+                token_count=len(node_text.split())
+            )
+        
+        logger.info(f"Saved document {doc_path.name} with {len(nodes)} chunks to agent {self.config.agent_name} tables")
+        return document_id
     
     async def _build_knowledge_graph(self, doc_path: Path, nodes: List[BaseNode]) -> int:
         """
@@ -483,34 +491,41 @@ class LlamaIndexIngestionPipeline:
         logger.info(f"Knowledge graph building not yet implemented for {doc_path.name} ({len(nodes)} nodes)")
         return 0
     
-    async def _clean_databases(self):
-        """Clean existing data from databases."""
-        logger.warning("Cleaning existing data from databases...")
+    async def _clean_agent_data(self):
+        """Clean existing data for this agent."""
+        logger.warning(f"Cleaning existing data for agent: {self.config.agent_name}")
         
-        # Clean PostgreSQL
-        async with db_pool.acquire() as conn:
-            async with conn.transaction():
-                await conn.execute("DELETE FROM messages")
-                await conn.execute("DELETE FROM sessions")
-                await conn.execute("DELETE FROM chunks")
-                await conn.execute("DELETE FROM documents")
+        # Use agent-specific clean function
+        try:
+            from ..agent.db_utils import clean_agent_data
+        except ImportError:
+            # For direct execution
+            from agent.db_utils import clean_agent_data
+        success = await clean_agent_data(self.config.agent_name)
         
-        logger.info("Cleaned PostgreSQL database")
+        if success:
+            logger.info(f"Cleaned data for agent: {self.config.agent_name}")
+        else:
+            logger.error(f"Failed to clean data for agent: {self.config.agent_name}")
 
 
 async def main():
     """Main function for running LlamaIndex-based ingestion."""
-    parser = argparse.ArgumentParser(description="LlamaIndex-based document ingestion")
+    parser = argparse.ArgumentParser(description="LlamaIndex-based document ingestion with multi-agent support")
     
-    # Required arguments
-    parser.add_argument("--local-folder", required=True,
-                       help="Path to folder containing documents")
+    # Agent and folder configuration
+    parser.add_argument("--agent-name", 
+                       default=os.getenv('DEFAULT_AGENT_NAME', 'main_agent'),
+                       help="Agent name for vector store tables (default: from env or 'main_agent')")
+    parser.add_argument("--ingestion-folder", "--local-folder",
+                       default=os.getenv('DEFAULT_INGESTION_FOLDER', 'documents/'),
+                       help="Path to folder containing documents (default: from env or 'documents/')")
     
-    # Optional arguments
+    # Optional arguments  
     parser.add_argument("--file-types", default="pdf,docx,pptx,md",
                        help="Comma-separated list of file extensions (default: pdf,docx,pptx,md)")
     parser.add_argument("--clean", "-c", action="store_true",
-                       help="Clean existing data before ingestion")
+                       help="Clean existing agent data before ingestion")
     parser.add_argument("--chunk-size", type=int, default=1000,
                        help="Chunk size for text splitting (default: 1000)")
     parser.add_argument("--chunk-overlap", type=int, default=200,
@@ -541,6 +556,8 @@ async def main():
         chunk_overlap=args.chunk_overlap,
         use_semantic_chunking=True,
         extract_entities=True,
+        agent_name=args.agent_name,
+        ingestion_folder=args.ingestion_folder,
         ingestion_mode=ingestion_mode_map[args.ingestion_mode]
     )
     
@@ -550,7 +567,7 @@ async def main():
     # Create and initialize pipeline
     pipeline = LlamaIndexIngestionPipeline(
         config=config,
-        local_folder=args.local_folder,
+        local_folder=args.ingestion_folder,
         file_types=file_types,
         clean_before_ingest=args.clean
     )
@@ -572,7 +589,8 @@ async def main():
         print("\n" + "="*60)
         print("LLAMAINDEX INGESTION SUMMARY")
         print("="*60)
-        print(f"Local folder: {args.local_folder}")
+        print(f"Agent name: {args.agent_name}")
+        print(f"Ingestion folder: {args.ingestion_folder}")
         print(f"File types: {args.file_types}")
         print(f"Ingestion mode: {args.ingestion_mode}")
         print(f"Documents processed: {len(results)}")
