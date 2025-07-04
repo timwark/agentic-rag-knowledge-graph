@@ -175,38 +175,30 @@ Content paragraph 2."""
 @pytest.fixture
 def sample_chunks():
     """Sample document chunks for testing."""
-    from ingestion.chunker import DocumentChunk
-    
+    # Simple chunk representation for testing (no longer using old DocumentChunk class)
     chunks = [
-        DocumentChunk(
-            content="This is the first chunk of content.",
-            index=0,
-            start_char=0,
-            end_char=36,
-            metadata={"title": "Test Doc", "topic": "AI"},
-            token_count=8
-        ),
-        DocumentChunk(
-            content="This is the second chunk with different content.",
-            index=1,
-            start_char=37,
-            end_char=85,
-            metadata={"title": "Test Doc", "topic": "AI"},
-            token_count=10
-        ),
-        DocumentChunk(
-            content="The third and final chunk completes the document.",
-            index=2,
-            start_char=86,
-            end_char=135,
-            metadata={"title": "Test Doc", "topic": "AI"},
-            token_count=9
-        )
+        {
+            "content": "This is the first chunk of content.",
+            "index": 0,
+            "metadata": {"title": "Test Doc", "topic": "AI"},
+            "token_count": 8,
+            "embedding": [0.1] * 1536
+        },
+        {
+            "content": "This is the second chunk with different content.",
+            "index": 1,
+            "metadata": {"title": "Test Doc", "topic": "AI"},
+            "token_count": 10,
+            "embedding": [0.1] * 1536
+        },
+        {
+            "content": "The third and final chunk completes the document.",
+            "index": 2,
+            "metadata": {"title": "Test Doc", "topic": "AI"},
+            "token_count": 9,
+            "embedding": [0.1] * 1536
+        }
     ]
-    
-    # Add mock embeddings
-    for chunk in chunks:
-        chunk.embedding = [0.1] * 1536
     
     return chunks
 

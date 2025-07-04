@@ -15,7 +15,7 @@ Built with:
 
 This system includes three main components:
 
-1. **Document Ingestion Pipeline**: Processes markdown documents using semantic chunking and builds both vector embeddings and knowledge graph relationships
+1. **Document Ingestion Pipeline**: Processes multiple document formats (PDF, DOCX, PPTX, MD) using LlamaIndex OSS patterns with semantic chunking and builds both vector embeddings and knowledge graph relationships
 2. **AI Agent Interface**: A conversational agent powered by Pydantic AI that can search across both vector database and knowledge graph
 3. **Streaming API**: FastAPI backend with real-time streaming responses and comprehensive search capabilities
 
@@ -126,13 +126,18 @@ LLM_CHOICE=gemini-2.5-flash
 
 ### 1. Prepare Your Documents
 
-Add your markdown documents to the `documents/` folder:
+Add your documents to the `documents/` folder. The system supports multiple formats:
 
 ```bash
 mkdir -p documents
-# Add your markdown files about tech companies, AI research, etc.
-# Example: documents/google_ai_initiatives.md
-#          documents/microsoft_openai_partnership.md
+# Add your documents in supported formats:
+# - PDF files (reports, research papers)
+# - DOCX files (Word documents)
+# - PPTX files (PowerPoint presentations)  
+# - MD files (markdown documents)
+# Example: documents/google_ai_initiatives.pdf
+#          documents/microsoft_openai_partnership.docx
+#          documents/ai_research_overview.md
 ```
 
 **Note**: For a comprehensive example with extensive content, you can copy the provided `big_tech_docs` folder:
@@ -146,23 +151,42 @@ This includes 21 detailed documents about major tech companies and their AI init
 **Important**: You must run ingestion first to populate the databases before the agent can provide meaningful responses.
 
 ```bash
-# Basic ingestion with semantic chunking
-python -m ingestion.ingest
+# Basic ingestion with semantic chunking (processes all supported file types)
+python -m ingestion.ingest --local-folder documents/
 
 # Clean existing data and re-ingest everything
-python -m ingestion.ingest --clean
+python -m ingestion.ingest --local-folder documents/ --clean
 
-# Custom settings for faster processing (no knowledge graph)
-python -m ingestion.ingest --chunk-size 800 --no-semantic --verbose
+# Process specific file types only
+python -m ingestion.ingest --local-folder documents/ --file-types pdf,docx
+
+# Custom settings for different processing modes
+python -m ingestion.ingest --local-folder documents/ --ingestion-mode vector_only --verbose
+python -m ingestion.ingest --local-folder documents/ --ingestion-mode graph_only --chunk-size 800
+python -m ingestion.ingest --local-folder documents/ --ingestion-mode both --chunk-size 1000 --chunk-overlap 200
 ```
 
+**Ingestion Parameters:**
+- `--local-folder` (required): Path to folder containing documents
+- `--file-types`: Comma-separated list of file extensions (default: pdf,docx,pptx,md)
+- `--ingestion-mode`: Choose vector_only, graph_only, or both (default: both)
+- `--chunk-size`: Text chunk size for splitting (default: 1000)
+- `--chunk-overlap`: Overlap between chunks (default: 200)
+- `--clean`: Clean existing data before ingestion
+- `--verbose`: Enable verbose logging
+
 The ingestion process will:
-- Parse and semantically chunk your documents
-- Generate embeddings for vector search
+- Load documents using specialized LlamaIndex readers for each format
+- Parse and semantically chunk your documents using SentenceSplitter
+- Generate embeddings for vector search using batch processing
 - Extract entities and relationships for the knowledge graph
 - Store everything in PostgreSQL and Neo4j
 
-NOTE that this can take a while because knowledge graphs are very computationally expensive!
+**Performance Notes:**
+- The system uses batch processing for efficient embedding generation
+- Rate limiting prevents API quota issues
+- PDF processing is optimized with PyMuPDF for fast text extraction
+- Knowledge graph building can be time-intensive for large document sets
 
 ### 3. Configure Agent Behavior (Optional)
 
@@ -308,9 +332,13 @@ The system excels at queries that benefit from both semantic search and relation
 
 2. **Temporal Intelligence**: Graphiti tracks how facts change over time, perfect for the rapidly evolving AI landscape
 
-3. **Flexible LLM Support**: Switch between OpenAI, Ollama, OpenRouter, or Gemini based on your needs
+3. **LlamaIndex Integration**: Follows OSS best practices with specialized readers for each document format, semantic chunking, and efficient batch processing
 
-4. **Production Ready**: Comprehensive testing, error handling, and monitoring
+4. **Multi-Format Support**: Handles PDF, DOCX, PPTX, and MD files with optimized processing for each format
+
+5. **Flexible LLM Support**: Switch between OpenAI, Ollama, OpenRouter, or Gemini based on your needs
+
+6. **Production Ready**: Comprehensive testing, error handling, and monitoring
 
 ## API Documentation
 
@@ -318,11 +346,14 @@ Visit http://localhost:8058/docs for interactive API documentation once the serv
 
 ## Key Features
 
+- **Multi-Format Document Processing**: Supports PDF, DOCX, PPTX, and MD files with specialized LlamaIndex readers
 - **Hybrid Search**: Seamlessly combines vector similarity and graph traversal
+- **LlamaIndex Integration**: Follows OSS best practices for document ingestion and processing
 - **Temporal Knowledge**: Tracks how information changes over time
 - **Streaming Responses**: Real-time AI responses with Server-Sent Events
+- **Batch Processing**: Efficient embedding generation with rate limiting
 - **Flexible Providers**: Support for multiple LLM and embedding providers
-- **Semantic Chunking**: Intelligent document splitting using LLM analysis
+- **Semantic Chunking**: Intelligent document splitting using SentenceSplitter
 - **Production Ready**: Comprehensive testing, logging, and error handling
 
 ## Project Structure
@@ -335,11 +366,11 @@ agentic-rag-knowledge-graph/
 │   ├── providers.py       # LLM provider abstraction
 │   └── models.py          # Data models
 ├── ingestion/             # Document processing
-│   ├── ingest.py         # Main ingestion pipeline
-│   ├── chunker.py        # Semantic chunking
-│   └── embedder.py       # Embedding generation
+│   ├── ingest.py                        # LlamaIndex-based ingestion pipeline
+│   └── llamaindex_document_processor.py # Document processor
 ├── sql/                   # Database schema
-├── documents/             # Your markdown files
+├── documents/             # Your documents (PDF, DOCX, PPTX, MD)
+├── big_tech_docs/         # Example markdown documents
 └── tests/                # Comprehensive test suite
 ```
 
@@ -375,8 +406,14 @@ curl -u neo4j:password http://localhost:7474/db/data/
 
 **No Results from Agent**: Make sure you've run the ingestion pipeline first
 ```bash
-python -m ingestion.ingest --verbose
+python -m ingestion.ingest --local-folder documents/ --verbose
 ```
+
+**File Format Issues**: Ensure your documents are in supported formats and properly formatted
+- PDF files should be text-based (not scanned images)
+- DOCX files should be standard Word documents
+- PPTX files should contain text content
+- MD files should use standard markdown syntax
 
 **LLM API Issues**: Check your API key and provider configuration in `.env`
 

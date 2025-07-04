@@ -11,23 +11,21 @@ import logging
 import json
 import argparse
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Callable
+from typing import List, Optional, Callable
 from datetime import datetime
 
 # Core LlamaIndex imports
 from llama_index.core import Document
 from llama_index.core.node_parser import SentenceSplitter
-from llama_index.core.schema import TextNode, BaseNode
+from llama_index.core.schema import TextNode, BaseNode, MetadataMode
 from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.readers.file import (
     PyMuPDFReader,
     DocxReader,
-    PptxReader,
-    UnstructuredReader
+    PptxReader
 )
 
 # Database imports
-import asyncpg
 from dotenv import load_dotenv
 
 # Local imports
@@ -64,7 +62,7 @@ class LlamaIndexIngestionPipeline:
         self,
         config: IngestionConfig,
         local_folder: str,
-        file_types: List[str] = None,
+        file_types: Optional[List[str]] = None,
         clean_before_ingest: bool = False
     ):
         """
@@ -223,7 +221,6 @@ class LlamaIndexIngestionPipeline:
             Ingestion result
         """
         start_time = datetime.now()
-        file_type = doc_path.suffix.lower()
         
         try:
             # Step 1: Load document using appropriate reader
@@ -390,7 +387,7 @@ class LlamaIndexIngestionPipeline:
                 batch = nodes[i:i + batch_size]
                 
                 # Generate embeddings for batch
-                texts = [node.get_content(metadata_mode="all") for node in batch]
+                texts = [node.get_content(metadata_mode=MetadataMode.ALL) for node in batch]
                 embeddings = await asyncio.to_thread(
                     self.embed_model.get_text_embedding_batch, texts
                 )
@@ -450,17 +447,20 @@ class LlamaIndexIngestionPipeline:
                     if hasattr(node, 'embedding') and node.embedding:
                         embedding_data = '[' + ','.join(map(str, node.embedding)) + ']'
                     
+                    # Get text content from node
+                    node_text = node.get_content() if hasattr(node, 'get_content') else str(node)
+                    
                     await conn.execute(
                         """
                         INSERT INTO chunks (document_id, content, embedding, chunk_index, metadata, token_count)
                         VALUES ($1::uuid, $2, $3::vector, $4, $5, $6)
                         """,
                         document_id,
-                        node.text,
+                        node_text,
                         embedding_data,
                         node.metadata.get('chunk_index', 0),
                         json.dumps(node.metadata),
-                        len(node.text.split())
+                        len(node_text.split())
                     )
                 
                 logger.info(f"Saved document {doc_path.name} with {len(nodes)} chunks to PostgreSQL")
@@ -479,7 +479,8 @@ class LlamaIndexIngestionPipeline:
         """
         # TODO: Implement knowledge graph building
         # This would integrate with the existing graph_builder
-        logger.info(f"Knowledge graph building not yet implemented for {doc_path.name}")
+        # When implemented, this will process the provided nodes for entity extraction
+        logger.info(f"Knowledge graph building not yet implemented for {doc_path.name} ({len(nodes)} nodes)")
         return 0
     
     async def _clean_databases(self):
