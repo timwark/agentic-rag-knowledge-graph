@@ -1,33 +1,43 @@
 """
-Main ingestion script for processing markdown documents into vector DB and knowledge graph.
+Document ingestion pipeline using LlamaIndex OSS patterns.
+
+This module provides a complete rewrite of the document ingestion system
+following LlamaIndex best practices for handling PDF, DOCX, PPTX, and MD files.
 """
 
 import os
 import asyncio
 import logging
 import json
-import glob
+import argparse
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Callable
 from datetime import datetime
-import argparse
 
+# Core LlamaIndex imports
+from llama_index.core import Document
+from llama_index.core.node_parser import SentenceSplitter
+from llama_index.core.schema import TextNode, BaseNode
+from llama_index.embeddings.openai import OpenAIEmbedding
+from llama_index.readers.file import (
+    PyMuPDFReader,
+    DocxReader,
+    PptxReader,
+    UnstructuredReader
+)
+
+# Database imports
 import asyncpg
 from dotenv import load_dotenv
 
-from .chunker import ChunkingConfig, create_chunker, DocumentChunk
-from .embedder import create_embedder
-from .graph_builder import create_graph_builder
-
-# Import agent utilities
+# Local imports
 try:
     from ..agent.db_utils import initialize_database, close_database, db_pool
     from ..agent.graph_utils import initialize_graph, close_graph
     from ..agent.models import IngestionConfig, IngestionResult, IngestionMode
 except ImportError:
-    # For direct execution or testing
+    # For direct execution
     import sys
-    import os
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from agent.db_utils import initialize_database, close_database, db_pool
     from agent.graph_utils import initialize_graph, close_graph
@@ -39,60 +49,91 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
-class DocumentIngestionPipeline:
-    """Pipeline for ingesting documents into vector DB and knowledge graph."""
+class LlamaIndexIngestionPipeline:
+    """
+    LlamaIndex-based document ingestion pipeline.
+    
+    Follows OSS patterns from LlamaIndex documentation for:
+    - Document loading with specialized readers
+    - Text splitting with semantic chunking
+    - Embedding generation with batching
+    - Vector store integration
+    """
     
     def __init__(
         self,
         config: IngestionConfig,
-        documents_folder: str = "documents",
+        local_folder: str,
+        file_types: List[str] = None,
         clean_before_ingest: bool = False
     ):
         """
-        Initialize ingestion pipeline.
+        Initialize the LlamaIndex ingestion pipeline.
         
         Args:
             config: Ingestion configuration
-            documents_folder: Folder containing markdown documents
-            clean_before_ingest: Whether to clean existing data before ingestion
+            local_folder: Path to folder containing documents
+            file_types: List of file extensions to process
+            clean_before_ingest: Whether to clean existing data
         """
         self.config = config
-        self.documents_folder = documents_folder
+        self.local_folder = Path(local_folder)
+        self.file_types = file_types or ['.pdf', '.docx', '.pptx', '.md']
         self.clean_before_ingest = clean_before_ingest
         
-        # Initialize components
-        self.chunker_config = ChunkingConfig(
+        # Initialize LlamaIndex components
+        self.text_splitter = SentenceSplitter(
             chunk_size=config.chunk_size,
             chunk_overlap=config.chunk_overlap,
-            max_chunk_size=config.max_chunk_size,
-            use_semantic_splitting=config.use_semantic_chunking
+            separator="\n\n"
         )
         
-        self.chunker = create_chunker(self.chunker_config)
-        self.embedder = create_embedder()
-        self.graph_builder = create_graph_builder()
+        # Initialize embedding model using environment variables
+        embedding_api_key = os.getenv('EMBEDDING_API_KEY') or os.getenv('OPENAI_API_KEY')
+        if not embedding_api_key:
+            raise ValueError("EMBEDDING_API_KEY or OPENAI_API_KEY must be set in environment")
+        
+        self.embed_model = OpenAIEmbedding(
+            model=os.getenv('EMBEDDING_MODEL', 'text-embedding-3-small'),
+            api_key=embedding_api_key,
+            embed_batch_size=100  # Batch embeddings for efficiency
+        )
+        
+        # Initialize readers
+        self.readers = {
+            '.pdf': PyMuPDFReader(),
+            '.docx': DocxReader(),
+            '.pptx': PptxReader(),
+            '.md': None  # Will use simple text reading
+        }
         
         self._initialized = False
+        logger.info(f"LlamaIndex pipeline initialized for: {self.local_folder}")
     
     async def initialize(self):
         """Initialize database connections."""
         if self._initialized:
             return
         
-        logger.info("Initializing ingestion pipeline...")
+        logger.info("Initializing LlamaIndex ingestion pipeline...")
         
         # Initialize database connections
         await initialize_database()
-        await initialize_graph()
-        await self.graph_builder.initialize()
+        
+        # Initialize graph if needed
+        if self.config.ingestion_mode in [IngestionMode.GRAPH_ONLY, IngestionMode.BOTH]:
+            await initialize_graph()
+        
+        # Clean databases if requested
+        if self.clean_before_ingest:
+            await self._clean_databases()
         
         self._initialized = True
-        logger.info("Ingestion pipeline initialized")
+        logger.info("LlamaIndex pipeline initialized successfully")
     
     async def close(self):
         """Close database connections."""
         if self._initialized:
-            await self.graph_builder.close()
             await close_graph()
             await close_database()
             self._initialized = False
@@ -102,47 +143,45 @@ class DocumentIngestionPipeline:
         progress_callback: Optional[Callable[[int, int], None]] = None
     ) -> List[IngestionResult]:
         """
-        Ingest all documents from the documents folder.
+        Ingest all documents from the local folder.
         
         Args:
             progress_callback: Optional callback for progress updates
-        
+            
         Returns:
             List of ingestion results
         """
         if not self._initialized:
             await self.initialize()
         
-        # Clean existing data if requested
-        if self.clean_before_ingest:
-            await self._clean_databases()
+        # Discover documents
+        document_paths = self._discover_documents()
         
-        # Find all markdown files
-        markdown_files = self._find_markdown_files()
-        
-        if not markdown_files:
-            logger.warning(f"No markdown files found in {self.documents_folder}")
+        if not document_paths:
+            logger.warning(f"No documents found in {self.local_folder}")
             return []
         
-        logger.info(f"Found {len(markdown_files)} markdown files to process")
+        logger.info(f"Found {len(document_paths)} documents to process")
         
         results = []
-        
-        for i, file_path in enumerate(markdown_files):
+        for i, doc_path in enumerate(document_paths):
             try:
-                logger.info(f"Processing file {i+1}/{len(markdown_files)}: {file_path}")
+                logger.info(f"Processing document {i+1}/{len(document_paths)}: {doc_path.name}")
                 
-                result = await self._ingest_single_document(file_path)
+                result = await self._ingest_single_document(doc_path)
                 results.append(result)
                 
                 if progress_callback:
-                    progress_callback(i + 1, len(markdown_files))
+                    progress_callback(i + 1, len(document_paths))
+                
+                # Add small delay between documents
+                await asyncio.sleep(0.1)
                 
             except Exception as e:
-                logger.error(f"Failed to process {file_path}: {e}")
+                logger.error(f"Failed to process {doc_path.name}: {e}")
                 results.append(IngestionResult(
                     document_id="",
-                    title=os.path.basename(file_path),
+                    title=doc_path.name,
                     chunks_created=0,
                     entities_extracted=0,
                     relationships_created=0,
@@ -158,186 +197,235 @@ class DocumentIngestionPipeline:
         
         return results
     
-    async def _ingest_single_document(self, file_path: str) -> IngestionResult:
+    def _discover_documents(self) -> List[Path]:
+        """Discover supported documents in the local folder."""
+        if not self.local_folder.exists():
+            logger.error(f"Local folder not found: {self.local_folder}")
+            return []
+        
+        documents = []
+        for file_type in self.file_types:
+            pattern = f"**/*{file_type}"
+            documents.extend(self.local_folder.glob(pattern))
+        
+        # Filter out hidden files and sort
+        documents = [d for d in documents if not d.name.startswith('.')]
+        return sorted(documents)
+    
+    async def _ingest_single_document(self, doc_path: Path) -> IngestionResult:
         """
-        Ingest a single document.
+        Ingest a single document using LlamaIndex patterns.
         
         Args:
-            file_path: Path to the document file
-        
+            doc_path: Path to the document
+            
         Returns:
             Ingestion result
         """
         start_time = datetime.now()
+        file_type = doc_path.suffix.lower()
         
-        # Read document
-        document_content = self._read_document(file_path)
-        document_title = self._extract_title(document_content, file_path)
-        document_source = os.path.relpath(file_path, self.documents_folder)
-        
-        # Extract metadata from content
-        document_metadata = self._extract_document_metadata(document_content, file_path)
-        
-        logger.info(f"Processing document: {document_title}")
-        
-        # Chunk the document
-        chunks = await self.chunker.chunk_document(
-            content=document_content,
-            title=document_title,
-            source=document_source,
-            metadata=document_metadata
-        )
-        
-        if not chunks:
-            logger.warning(f"No chunks created for {document_title}")
+        try:
+            # Step 1: Load document using appropriate reader
+            documents = await self._load_document(doc_path)
+            
+            if not documents:
+                raise Exception("No content extracted from document")
+            
+            # Step 2: Split documents into chunks
+            nodes = await self._split_documents(documents)
+            
+            if not nodes:
+                raise Exception("No chunks created from document")
+            
+            # Step 3: Generate embeddings for nodes
+            if self.config.ingestion_mode in [IngestionMode.VECTOR_ONLY, IngestionMode.BOTH]:
+                await self._generate_embeddings(nodes)
+            
+            # Step 4: Save to PostgreSQL
+            document_id = ""
+            if self.config.ingestion_mode in [IngestionMode.VECTOR_ONLY, IngestionMode.BOTH]:
+                document_id = await self._save_to_postgres(doc_path, documents[0], nodes)
+            
+            # Step 5: Build knowledge graph (if enabled)
+            relationships_created = 0
+            if self.config.ingestion_mode in [IngestionMode.GRAPH_ONLY, IngestionMode.BOTH]:
+                relationships_created = await self._build_knowledge_graph(doc_path, nodes)
+            
+            # Calculate processing time
+            processing_time = (datetime.now() - start_time).total_seconds() * 1000
+            
+            return IngestionResult(
+                document_id=document_id,
+                title=doc_path.name,
+                chunks_created=len(nodes),
+                entities_extracted=0,  # TODO: Implement entity extraction
+                relationships_created=relationships_created,
+                processing_time_ms=processing_time,
+                errors=[]
+            )
+            
+        except Exception as e:
+            processing_time = (datetime.now() - start_time).total_seconds() * 1000
+            logger.error(f"Error processing {doc_path.name}: {e}")
+            
             return IngestionResult(
                 document_id="",
-                title=document_title,
+                title=doc_path.name,
                 chunks_created=0,
                 entities_extracted=0,
                 relationships_created=0,
-                processing_time_ms=(datetime.now() - start_time).total_seconds() * 1000,
-                errors=["No chunks created"]
+                processing_time_ms=processing_time,
+                errors=[str(e)]
             )
-        
-        # Generate embeddings and save to PostgreSQL (unless graph_only mode)
-        document_id = ""
-        entities_extracted = 0
-        relationships_created = 0
-        graph_errors = []
-        
-        if self.config.ingestion_mode in [IngestionMode.VECTOR_ONLY, IngestionMode.BOTH]:
-            try:
-                # Generate embeddings
-                embedded_chunks = await self.embedder.embed_chunks(chunks)
-                
-                # Save to PostgreSQL
-                document_id = await self._save_to_postgres(
-                    title=document_title,
-                    source=document_source,
-                    content=document_content,
-                    chunks=embedded_chunks,
-                    metadata=document_metadata
-                )
-                
-                logger.info(f"Saved {len(chunks)} chunks to vector database")
-                
-            except Exception as e:
-                error_msg = f"Failed to save to vector database: {str(e)}"
-                logger.error(error_msg)
-                graph_errors.append(error_msg)
-        
-        # Build knowledge graph (unless vector_only mode)
-        if self.config.ingestion_mode in [IngestionMode.GRAPH_ONLY, IngestionMode.BOTH]:
-            try:
-                logger.info("Building knowledge graph relationships (this may take several minutes)...")
-                graph_result = await self.graph_builder.add_document_to_graph(
-                    chunks=chunks,  # Use original chunks for graph building
-                    document_title=document_title,
-                    document_source=document_source,
-                    document_metadata=document_metadata
-                )
-                
-                relationships_created = graph_result.get("episodes_created", 0)
-                graph_errors = graph_result.get("errors", [])
-                
-                logger.info(f"Added {relationships_created} episodes to knowledge graph")
-                
-            except Exception as e:
-                error_msg = f"Failed to add to knowledge graph: {str(e)}"
-                logger.error(error_msg)
-                graph_errors.append(error_msg)
-        else:
-            logger.info("Skipping knowledge graph building (vector_only mode)")
-        
-        # Calculate processing time
-        processing_time = (datetime.now() - start_time).total_seconds() * 1000
-        
-        return IngestionResult(
-            document_id=document_id,
-            title=document_title,
-            chunks_created=len(chunks),
-            entities_extracted=entities_extracted,
-            relationships_created=relationships_created,
-            processing_time_ms=processing_time,
-            errors=graph_errors
-        )
     
-    def _find_markdown_files(self) -> List[str]:
-        """Find all markdown files in the documents folder."""
-        if not os.path.exists(self.documents_folder):
-            logger.error(f"Documents folder not found: {self.documents_folder}")
-            return []
+    async def _load_document(self, doc_path: Path) -> List[Document]:
+        """
+        Load document using appropriate LlamaIndex reader.
         
-        patterns = ["*.md", "*.markdown", "*.txt"]
-        files = []
+        Args:
+            doc_path: Path to document
+            
+        Returns:
+            List of LlamaIndex Document objects
+        """
+        file_type = doc_path.suffix.lower()
         
-        for pattern in patterns:
-            files.extend(glob.glob(os.path.join(self.documents_folder, "**", pattern), recursive=True))
-        
-        return sorted(files)
-    
-    def _read_document(self, file_path: str) -> str:
-        """Read document content from file."""
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                return f.read()
-        except UnicodeDecodeError:
-            # Try with different encoding
-            with open(file_path, 'r', encoding='latin-1') as f:
-                return f.read()
+            if file_type == '.pdf':
+                reader = self.readers['.pdf']
+                documents = reader.load_data(file_path=str(doc_path))
+            elif file_type == '.docx':
+                reader = self.readers['.docx']
+                documents = reader.load_data(file_path=str(doc_path))
+            elif file_type == '.pptx':
+                reader = self.readers['.pptx']
+                documents = reader.load_data(file_path=str(doc_path))
+            elif file_type == '.md':
+                # Simple text reading for markdown
+                with open(doc_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                documents = [Document(
+                    text=content,
+                    metadata={
+                        'file_path': str(doc_path),
+                        'file_name': doc_path.name,
+                        'file_type': file_type
+                    }
+                )]
+            else:
+                raise ValueError(f"Unsupported file type: {file_type}")
+            
+            # Enhance metadata
+            for doc in documents:
+                doc.metadata.update({
+                    'file_path': str(doc_path),
+                    'file_name': doc_path.name,
+                    'file_type': file_type,
+                    'file_size': doc_path.stat().st_size,
+                    'ingestion_date': datetime.now().isoformat()
+                })
+            
+            logger.info(f"Loaded {len(documents)} document(s) from {doc_path.name}")
+            return documents
+            
+        except Exception as e:
+            logger.error(f"Error loading document {doc_path.name}: {e}")
+            raise
     
-    def _extract_title(self, content: str, file_path: str) -> str:
-        """Extract title from document content or filename."""
-        # Try to find markdown title
-        lines = content.split('\n')
-        for line in lines[:10]:  # Check first 10 lines
-            line = line.strip()
-            if line.startswith('# '):
-                return line[2:].strip()
+    async def _split_documents(self, documents: List[Document]) -> List[BaseNode]:
+        """
+        Split documents into chunks using LlamaIndex SentenceSplitter.
         
-        # Fallback to filename
-        return os.path.splitext(os.path.basename(file_path))[0]
-    
-    def _extract_document_metadata(self, content: str, file_path: str) -> Dict[str, Any]:
-        """Extract metadata from document content."""
-        metadata = {
-            "file_path": file_path,
-            "file_size": len(content),
-            "ingestion_date": datetime.now().isoformat()
-        }
+        Args:
+            documents: List of LlamaIndex Document objects
+            
+        Returns:
+            List of TextNode objects
+        """
+        nodes = []
         
-        # Try to extract YAML frontmatter
-        if content.startswith('---'):
+        for doc_idx, document in enumerate(documents):
             try:
-                import yaml
-                end_marker = content.find('\n---\n', 4)
-                if end_marker != -1:
-                    frontmatter = content[4:end_marker]
-                    yaml_metadata = yaml.safe_load(frontmatter)
-                    if isinstance(yaml_metadata, dict):
-                        metadata.update(yaml_metadata)
-            except ImportError:
-                logger.warning("PyYAML not installed, skipping frontmatter extraction")
+                # Split document text into chunks
+                text_chunks = self.text_splitter.split_text(document.text)
+                
+                # Create TextNode for each chunk
+                for chunk_idx, chunk_text in enumerate(text_chunks):
+                    if not chunk_text.strip():
+                        continue
+                    
+                    node = TextNode(
+                        text=chunk_text,
+                        metadata={
+                            **document.metadata,
+                            'chunk_index': chunk_idx,
+                            'doc_index': doc_idx,
+                            'chunk_id': f"{doc_idx}_{chunk_idx}"
+                        }
+                    )
+                    nodes.append(node)
+                
+                logger.info(f"Created {len(text_chunks)} chunks from document {doc_idx}")
+                
             except Exception as e:
-                logger.warning(f"Failed to parse frontmatter: {e}")
+                logger.error(f"Error splitting document {doc_idx}: {e}")
+                raise
         
-        # Extract some basic metadata from content
-        lines = content.split('\n')
-        metadata['line_count'] = len(lines)
-        metadata['word_count'] = len(content.split())
+        return nodes
+    
+    async def _generate_embeddings(self, nodes: List[BaseNode]) -> None:
+        """
+        Generate embeddings for nodes using batch processing.
         
-        return metadata
+        Args:
+            nodes: List of TextNode objects to embed
+        """
+        logger.info(f"Generating embeddings for {len(nodes)} nodes")
+        
+        try:
+            # Batch process embeddings for efficiency
+            batch_size = 50
+            for i in range(0, len(nodes), batch_size):
+                batch = nodes[i:i + batch_size]
+                
+                # Generate embeddings for batch
+                texts = [node.get_content(metadata_mode="all") for node in batch]
+                embeddings = await asyncio.to_thread(
+                    self.embed_model.get_text_embedding_batch, texts
+                )
+                
+                # Assign embeddings to nodes
+                for node, embedding in zip(batch, embeddings):
+                    node.embedding = embedding
+                
+                # Rate limiting
+                if i + batch_size < len(nodes):
+                    await asyncio.sleep(0.1)
+                
+                logger.info(f"Generated embeddings for batch {i//batch_size + 1}/{(len(nodes) + batch_size - 1)//batch_size}")
+            
+        except Exception as e:
+            logger.error(f"Error generating embeddings: {e}")
+            raise
     
     async def _save_to_postgres(
-        self,
-        title: str,
-        source: str,
-        content: str,
-        chunks: List[DocumentChunk],
-        metadata: Dict[str, Any]
+        self, 
+        doc_path: Path, 
+        document: Document, 
+        nodes: List[BaseNode]
     ) -> str:
-        """Save document and chunks to PostgreSQL."""
+        """
+        Save document and chunks to PostgreSQL.
+        
+        Args:
+            doc_path: Path to original document
+            document: LlamaIndex Document object
+            nodes: List of TextNode objects with embeddings
+            
+        Returns:
+            Document ID
+        """
         async with db_pool.acquire() as conn:
             async with conn.transaction():
                 # Insert document
@@ -347,21 +435,20 @@ class DocumentIngestionPipeline:
                     VALUES ($1, $2, $3, $4)
                     RETURNING id::text
                     """,
-                    title,
-                    source,
-                    content,
-                    json.dumps(metadata)
+                    doc_path.name,
+                    str(doc_path),
+                    document.text,
+                    json.dumps(document.metadata)
                 )
                 
                 document_id = document_result["id"]
                 
                 # Insert chunks
-                for chunk in chunks:
-                    # Convert embedding to PostgreSQL vector string format
+                for node in nodes:
+                    # Convert embedding to PostgreSQL vector format
                     embedding_data = None
-                    if hasattr(chunk, 'embedding') and chunk.embedding:
-                        # PostgreSQL vector format: '[1.0,2.0,3.0]' (no spaces after commas)
-                        embedding_data = '[' + ','.join(map(str, chunk.embedding)) + ']'
+                    if hasattr(node, 'embedding') and node.embedding:
+                        embedding_data = '[' + ','.join(map(str, node.embedding)) + ']'
                     
                     await conn.execute(
                         """
@@ -369,14 +456,31 @@ class DocumentIngestionPipeline:
                         VALUES ($1::uuid, $2, $3::vector, $4, $5, $6)
                         """,
                         document_id,
-                        chunk.content,
+                        node.text,
                         embedding_data,
-                        chunk.index,
-                        json.dumps(chunk.metadata),
-                        chunk.token_count
+                        node.metadata.get('chunk_index', 0),
+                        json.dumps(node.metadata),
+                        len(node.text.split())
                     )
                 
+                logger.info(f"Saved document {doc_path.name} with {len(nodes)} chunks to PostgreSQL")
                 return document_id
+    
+    async def _build_knowledge_graph(self, doc_path: Path, nodes: List[BaseNode]) -> int:
+        """
+        Build knowledge graph from document nodes.
+        
+        Args:
+            doc_path: Path to original document
+            nodes: List of TextNode objects
+            
+        Returns:
+            Number of relationships created
+        """
+        # TODO: Implement knowledge graph building
+        # This would integrate with the existing graph_builder
+        logger.info(f"Knowledge graph building not yet implemented for {doc_path.name}")
+        return 0
     
     async def _clean_databases(self):
         """Clean existing data from databases."""
@@ -391,25 +495,29 @@ class DocumentIngestionPipeline:
                 await conn.execute("DELETE FROM documents")
         
         logger.info("Cleaned PostgreSQL database")
-        
-        # Clean knowledge graph
-        await self.graph_builder.clear_graph()
-        logger.info("Cleaned knowledge graph")
 
 
 async def main():
-    """Main function for running ingestion."""
-    parser = argparse.ArgumentParser(description="Ingest documents into vector DB and knowledge graph")
-    parser.add_argument("--documents", "-d", default="documents", help="Documents folder path")
-    parser.add_argument("--clean", "-c", action="store_true", help="Clean existing data before ingestion")
-    parser.add_argument("--chunk-size", type=int, default=1000, help="Chunk size for splitting documents")
-    parser.add_argument("--chunk-overlap", type=int, default=200, help="Chunk overlap size")
-    parser.add_argument("--no-semantic", action="store_true", help="Disable semantic chunking")
-    parser.add_argument("--no-entities", action="store_true", help="Disable entity extraction")
-    parser.add_argument("--fast", "-f", action="store_true", help="Fast mode: skip knowledge graph building (legacy)")
-    parser.add_argument("--ingestion-mode", choices=["vector_only", "graph_only", "both"], 
-                       default="both", help="Ingestion mode: vector_only, graph_only, or both")
-    parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
+    """Main function for running LlamaIndex-based ingestion."""
+    parser = argparse.ArgumentParser(description="LlamaIndex-based document ingestion")
+    
+    # Required arguments
+    parser.add_argument("--local-folder", required=True,
+                       help="Path to folder containing documents")
+    
+    # Optional arguments
+    parser.add_argument("--file-types", default="pdf,docx,pptx,md",
+                       help="Comma-separated list of file extensions (default: pdf,docx,pptx,md)")
+    parser.add_argument("--clean", "-c", action="store_true",
+                       help="Clean existing data before ingestion")
+    parser.add_argument("--chunk-size", type=int, default=1000,
+                       help="Chunk size for text splitting (default: 1000)")
+    parser.add_argument("--chunk-overlap", type=int, default=200,
+                       help="Chunk overlap size (default: 200)")
+    parser.add_argument("--ingestion-mode", choices=["vector_only", "graph_only", "both"],
+                       default="both", help="Ingestion mode (default: both)")
+    parser.add_argument("--verbose", "-v", action="store_true",
+                       help="Enable verbose logging")
     
     args = parser.parse_args()
     
@@ -420,29 +528,33 @@ async def main():
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )
     
-    # Map ingestion mode
+    # Create ingestion configuration
     ingestion_mode_map = {
         "vector_only": IngestionMode.VECTOR_ONLY,
         "graph_only": IngestionMode.GRAPH_ONLY,
         "both": IngestionMode.BOTH
     }
     
-    # Create ingestion configuration
     config = IngestionConfig(
         chunk_size=args.chunk_size,
         chunk_overlap=args.chunk_overlap,
-        use_semantic_chunking=not args.no_semantic,
-        extract_entities=not args.no_entities,
-        ingestion_mode=ingestion_mode_map[args.ingestion_mode],
-        skip_graph_building=args.fast  # Legacy support
+        use_semantic_chunking=True,
+        extract_entities=True,
+        ingestion_mode=ingestion_mode_map[args.ingestion_mode]
     )
     
-    # Create and run pipeline
-    pipeline = DocumentIngestionPipeline(
+    # Parse file types
+    file_types = [f".{ext.strip()}" for ext in args.file_types.split(',')]
+    
+    # Create and initialize pipeline
+    pipeline = LlamaIndexIngestionPipeline(
         config=config,
-        documents_folder=args.documents,
+        local_folder=args.local_folder,
+        file_types=file_types,
         clean_before_ingest=args.clean
     )
+    
+    await pipeline.initialize()
     
     def progress_callback(current: int, total: int):
         print(f"Progress: {current}/{total} documents processed")
@@ -456,26 +568,25 @@ async def main():
         total_time = (end_time - start_time).total_seconds()
         
         # Print summary
-        print("\n" + "="*50)
-        print("INGESTION SUMMARY")
-        print("="*50)
+        print("\n" + "="*60)
+        print("LLAMAINDEX INGESTION SUMMARY")
+        print("="*60)
+        print(f"Local folder: {args.local_folder}")
+        print(f"File types: {args.file_types}")
         print(f"Ingestion mode: {args.ingestion_mode}")
         print(f"Documents processed: {len(results)}")
         print(f"Total chunks created: {sum(r.chunks_created for r in results)}")
-        print(f"Total entities extracted: {sum(r.entities_extracted for r in results)}")
-        print(f"Total graph episodes: {sum(r.relationships_created for r in results)}")
         print(f"Total errors: {sum(len(r.errors) for r in results)}")
-        print(f"Total processing time: {total_time:.2f} seconds")
+        print(f"Processing time: {total_time:.2f} seconds")
         print()
         
         # Print individual results
         for result in results:
             status = "✓" if not result.errors else "✗"
-            print(f"{status} {result.title}: {result.chunks_created} chunks, {result.entities_extracted} entities")
+            print(f"{status} {result.title}: {result.chunks_created} chunks")
             
-            if result.errors:
-                for error in result.errors:
-                    print(f"  Error: {error}")
+            for error in result.errors:
+                print(f"  Error: {error}")
         
     except KeyboardInterrupt:
         print("\nIngestion interrupted by user")

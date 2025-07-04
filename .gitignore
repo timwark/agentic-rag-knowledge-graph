@@ -187,6 +187,9 @@ docker-compose.override.yml
 test-results/
 test-reports/
 
+# Test documents (generated PDFs)
+tests/docs/*.pdf
+
 # Neo4j
 neo4j/
 
