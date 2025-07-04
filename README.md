@@ -570,4 +570,4 @@ python -m ingestion.ingest --local-folder documents/ --verbose
 
 ---
 
-Built with ❤️ using Pydantic AI, FastAPI, PostgreSQL, and Neo4j.
+Built with ❤️ using Pydantic AI, LlamaIndex, FastAPI, PostgreSQL, and Neo4j.
