@@ -7,6 +7,7 @@ Built with:
 - Pydantic AI for the AI Agent Framework
 - Graphiti for the Knowledge Graph
 - Postgres with PGVector for the Vector Database
+- LlamaIndex Ingestion System for document ingestion for RAG Vector Search 
 - Neo4j for the Knowledge Graph Engine (Graphiti connects to this)
 - FastAPI for the Agent API
 - Claude Code for the AI Coding Assistant (See `CLAUDE.md`, `PLANNING.md`, and `TASK.md`)
