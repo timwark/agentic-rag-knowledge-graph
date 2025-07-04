@@ -16,7 +16,11 @@ from .db_utils import (
     hybrid_search,
     get_document,
     list_documents,
-    get_document_chunks
+    get_document_chunks,
+    vector_search_agent,
+    hybrid_search_agent,
+    list_documents_agent,
+    ensure_agent_schema
 )
 from .graph_utils import (
     search_knowledge_graph,
@@ -34,6 +38,9 @@ logger = logging.getLogger(__name__)
 # Initialize embedding client with flexible provider
 embedding_client = get_embedding_client()
 EMBEDDING_MODEL = get_embedding_model()
+
+# Get agent name from environment
+AGENT_NAME = os.getenv('DEFAULT_AGENT_NAME', 'main_agent')
 
 
 async def generate_embedding(text: str) -> List[float]:
@@ -101,22 +108,28 @@ class EntityTimelineInput(BaseModel):
 
 
 # Tool Implementation Functions
-async def vector_search_tool(input_data: VectorSearchInput) -> List[ChunkResult]:
+async def vector_search_tool(input_data: VectorSearchInput, agent_name: str = None) -> List[ChunkResult]:
     """
     Perform vector similarity search.
     
     Args:
         input_data: Search parameters
+        agent_name: Agent name for vector store (defaults to env var)
     
     Returns:
         List of matching chunks
     """
     try:
+        # Use provided agent name or fall back to environment default
+        current_agent_name = agent_name or AGENT_NAME
+        
         # Generate embedding for the query
         embedding = await generate_embedding(input_data.query)
         
-        # Perform vector search
-        results = await vector_search(
+        # Ensure agent schema exists and perform agent-specific vector search
+        await ensure_agent_schema()
+        results = await vector_search_agent(
+            agent_name=current_agent_name,
             embedding=embedding,
             limit=input_data.limit
         )
@@ -127,7 +140,7 @@ async def vector_search_tool(input_data: VectorSearchInput) -> List[ChunkResult]
                 chunk_id=str(r["chunk_id"]),
                 document_id=str(r["document_id"]),
                 content=r["content"],
-                score=r["similarity"],
+                score=r["score"],  # agent functions use "score" instead of "similarity"
                 metadata=r["metadata"],
                 document_title=r["document_title"],
                 document_source=r["document_source"]
@@ -172,22 +185,28 @@ async def graph_search_tool(input_data: GraphSearchInput) -> List[GraphSearchRes
         return []
 
 
-async def hybrid_search_tool(input_data: HybridSearchInput) -> List[ChunkResult]:
+async def hybrid_search_tool(input_data: HybridSearchInput, agent_name: str = None) -> List[ChunkResult]:
     """
     Perform hybrid search (vector + keyword).
     
     Args:
         input_data: Search parameters
+        agent_name: Agent name for vector store (defaults to env var)
     
     Returns:
         List of matching chunks
     """
     try:
+        # Use provided agent name or fall back to environment default
+        current_agent_name = agent_name or AGENT_NAME
+        
         # Generate embedding for the query
         embedding = await generate_embedding(input_data.query)
         
-        # Perform hybrid search
-        results = await hybrid_search(
+        # Ensure agent schema exists and perform agent-specific hybrid search
+        await ensure_agent_schema()
+        results = await hybrid_search_agent(
+            agent_name=current_agent_name,
             embedding=embedding,
             query_text=input_data.query,
             limit=input_data.limit,
@@ -238,18 +257,25 @@ async def get_document_tool(input_data: DocumentInput) -> Optional[Dict[str, Any
         return None
 
 
-async def list_documents_tool(input_data: DocumentListInput) -> List[DocumentMetadata]:
+async def list_documents_tool(input_data: DocumentListInput, agent_name: str = None) -> List[DocumentMetadata]:
     """
     List available documents.
     
     Args:
         input_data: Listing parameters
+        agent_name: Agent name for document listing (defaults to env var)
     
     Returns:
         List of document metadata
     """
     try:
-        documents = await list_documents(
+        # Use provided agent name or fall back to environment default
+        current_agent_name = agent_name or AGENT_NAME
+        
+        # Ensure agent schema exists and use agent-specific document listing
+        await ensure_agent_schema()
+        documents = await list_documents_agent(
+            agent_name=current_agent_name,
             limit=input_data.limit,
             offset=input_data.offset
         )
@@ -339,7 +365,8 @@ async def perform_comprehensive_search(
     query: str,
     use_vector: bool = True,
     use_graph: bool = True,
-    limit: int = 10
+    limit: int = 10,
+    agent_name: str = None
 ) -> Dict[str, Any]:
     """
     Perform a comprehensive search using multiple methods.
@@ -349,6 +376,7 @@ async def perform_comprehensive_search(
         use_vector: Whether to use vector search
         use_graph: Whether to use graph search
         limit: Maximum results per search type (only applies to vector search)
+        agent_name: Agent name for vector store (defaults to env var)
     
     Returns:
         Combined search results
@@ -363,7 +391,7 @@ async def perform_comprehensive_search(
     tasks = []
     
     if use_vector:
-        tasks.append(vector_search_tool(VectorSearchInput(query=query, limit=limit)))
+        tasks.append(vector_search_tool(VectorSearchInput(query=query, limit=limit), agent_name=agent_name))
     
     if use_graph:
         tasks.append(graph_search_tool(GraphSearchInput(query=query)))

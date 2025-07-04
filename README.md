@@ -1,6 +1,6 @@
 # Agentic RAG with Knowledge Graph
 
-Agentic knowledge retrieval redefined with an AI agent system that combines traditional RAG (vector search) with knowledge graph capabilities to analyze and provide insights about big tech companies and their AI initiatives. The system uses PostgreSQL with pgvector for semantic search and Neo4j with Graphiti for temporal knowledge graphs. The goal is to create Agentic RAG at its finest.
+Agentic knowledge retrieval redefined with a **multi-agent AI system** that combines traditional RAG (vector search) with knowledge graph capabilities. Each agent maintains **isolated vector stores** for specialized domains while sharing the same knowledge graph. The system uses PostgreSQL with pgvector for semantic search and Neo4j with Graphiti for temporal knowledge graphs. The goal is to create Agentic RAG at its finest with **multi-agent vector store isolation**.
 
 Built with:
 
@@ -19,6 +19,36 @@ This system includes three main components:
 1. **Document Ingestion Pipeline**: Processes multiple document formats (PDF, DOCX, PPTX, MD) using LlamaIndex OSS patterns with semantic chunking and builds both vector embeddings and knowledge graph relationships
 2. **AI Agent Interface**: A conversational agent powered by Pydantic AI that can search across both vector database and knowledge graph
 3. **Streaming API**: FastAPI backend with real-time streaming responses and comprehensive search capabilities
+
+## 🚀 Multi-Agent Vector Store Architecture
+
+### What is Multi-Agent Support?
+
+This system supports **multiple isolated agents**, each with their own dedicated vector stores while sharing a common knowledge graph. This architecture enables:
+
+- **Domain Specialization**: Different agents for different topics (e.g., `tech_agent`, `finance_agent`, `research_agent`)
+- **Data Isolation**: Each agent's documents and chunks are completely isolated from other agents
+- **Shared Knowledge**: All agents can access the same temporal knowledge graph for relationship queries
+- **Easy Switching**: Command-line control to specify which agent to use for both server and client
+
+### Agent Naming Convention
+
+- **Agent Names**: Must be alphanumeric with underscores only (e.g., `main_agent`, `test_agent`, `tech_research`)
+- **Database Tables**: Each agent gets dedicated tables: `agent_{name}_documents` and `agent_{name}_chunks`
+- **Default Agent**: `main_agent` (configurable via `.env` or command line)
+
+### Example Use Cases
+
+```bash
+# Financial analysis agent with finance documents
+python ingestion/ingest.py --agent-name finance_agent --local-folder finance_docs/
+
+# Technology research agent with tech papers  
+python ingestion/ingest.py --agent-name tech_agent --local-folder tech_research/
+
+# General purpose agent with mixed content
+python ingestion/ingest.py --agent-name main_agent --local-folder documents/
+```
 
 ## Prerequisites
 
@@ -73,6 +103,11 @@ You have a couple easy options for setting up Neo4j:
 Create a `.env` file in the project root:
 
 ```bash
+# Multi-Agent Configuration
+DEFAULT_AGENT_NAME=main_agent
+DEFAULT_INGESTION_FOLDER=documents/
+AGENT_TABLE_PREFIX=agent_
+
 # Database Configuration (example Neon connection string)
 DATABASE_URL=postgresql://username:password@ep-example-12345.us-east-2.aws.neon.tech/neondb
 
@@ -151,24 +186,38 @@ This includes 21 detailed documents about major tech companies and their AI init
 
 **Important**: You must run ingestion first to populate the databases before the agent can provide meaningful responses.
 
+#### Basic Multi-Agent Ingestion
+
 ```bash
-# Basic ingestion with semantic chunking (processes all supported file types)
-python -m ingestion.ingest --local-folder documents/
+# Ingest documents for the default agent (main_agent)
+python ingestion/ingest.py --local-folder documents/
 
-# Clean existing data and re-ingest everything
-python -m ingestion.ingest --local-folder documents/ --clean
+# Ingest documents for a specific agent
+python ingestion/ingest.py --agent-name test_agent --local-folder test_docs/
 
-# Process specific file types only
-python -m ingestion.ingest --local-folder documents/ --file-types pdf,docx
+# Create specialized agents for different domains
+python ingestion/ingest.py --agent-name finance_agent --local-folder finance_docs/
+python ingestion/ingest.py --agent-name tech_agent --local-folder tech_research/
+```
+
+#### Advanced Ingestion Options
+
+```bash
+# Clean existing data for an agent and re-ingest everything
+python ingestion/ingest.py --agent-name test_agent --local-folder documents/ --clean
+
+# Process specific file types only for an agent
+python ingestion/ingest.py --agent-name research_agent --local-folder docs/ --file-types pdf,docx
 
 # Custom settings for different processing modes
-python -m ingestion.ingest --local-folder documents/ --ingestion-mode vector_only --verbose
-python -m ingestion.ingest --local-folder documents/ --ingestion-mode graph_only --chunk-size 800
-python -m ingestion.ingest --local-folder documents/ --ingestion-mode both --chunk-size 1000 --chunk-overlap 200
+python ingestion/ingest.py --agent-name main_agent --local-folder documents/ --ingestion-mode vector_only --verbose
+python ingestion/ingest.py --agent-name graph_agent --local-folder documents/ --ingestion-mode graph_only --chunk-size 800
+python ingestion/ingest.py --agent-name hybrid_agent --local-folder documents/ --ingestion-mode both --chunk-size 1000 --chunk-overlap 200
 ```
 
 **Ingestion Parameters:**
-- `--local-folder` (required): Path to folder containing documents
+- `--agent-name`: Agent name for vector store isolation (overrides .env DEFAULT_AGENT_NAME)
+- `--local-folder`/`--ingestion-folder`: Path to folder containing documents (overrides .env DEFAULT_INGESTION_FOLDER)
 - `--file-types`: Comma-separated list of file extensions (default: pdf,docx,pptx,md)
 - `--ingestion-mode`: Choose vector_only, graph_only, or both (default: both)
 - `--chunk-size`: Text chunk size for splitting (default: 1000)
@@ -196,29 +245,50 @@ Before running the API server, you can customize when the agent uses different t
 - How to combine results from different sources
 - The agent's reasoning strategy for tool selection
 
-### 4. Start the API Server (Terminal 1)
+### 4. Start the Multi-Agent API Server (Terminal 1)
 
 ```bash
-# Start the FastAPI server
-python -m agent.api
+# Start the server with the default agent (main_agent)
+python agent/api.py
 
-# Server will be available at http://localhost:8058
+# Start the server with a specific agent
+python agent/api.py --agent-name test_agent
+
+# Start the server with custom host and port
+python agent/api.py --agent-name finance_agent --host 0.0.0.0 --port 8080
+
+# Server will be available at the specified host:port (default: http://localhost:8058)
 ```
 
-### 5. Use the Command Line Interface (Terminal 2)
+**Server Command Line Options:**
+- `--agent-name`: Agent to use for all API operations (overrides .env DEFAULT_AGENT_NAME)
+- `--host`: Host to bind the server to (default: from .env APP_HOST)
+- `--port`: Port to bind the server to (default: from .env APP_PORT)
+
+### 5. Use the Multi-Agent Command Line Interface (Terminal 2)
 
 The CLI provides an interactive way to chat with the agent and see which tools it uses for each query.
 
 ```bash
-# Start the CLI in a separate terminal from the API (connects to default API at http://localhost:8058)
+# Start the CLI with the default agent
 python cli.py
 
-# Connect to a different URL
-python cli.py --url http://localhost:8058
+# Start the CLI with a specific agent
+python cli.py --agent-name test_agent
 
-# Connect to a specific port
-python cli.py --port 8080
+# Connect to a different server with specific agent
+python cli.py --agent-name finance_agent --url http://localhost:8080
+
+# Connect to a specific port with agent
+python cli.py --agent-name tech_agent --port 8080
 ```
+
+**Client Command Line Options:**
+- `--agent-name`: Agent to use for all queries (overrides .env DEFAULT_AGENT_NAME)
+- `--url`: Base URL for the API (default: http://localhost:8058)
+- `--port`: Port number (overrides URL port)
+
+> **Important**: The server and client agent names should match! If the server is running with `--agent-name test_agent`, the client should also use `--agent-name test_agent` to access the same vector store.
 
 #### CLI Features
 
@@ -236,6 +306,7 @@ python cli.py --port 8080
 🤖 Agentic RAG with Knowledge Graph CLI
 ============================================================
 Connected to: http://localhost:8058
+📊 Agent: test_agent
 
 You: What are Microsoft's AI initiatives?
 
@@ -264,6 +335,85 @@ Microsoft has a significant strategic partnership with OpenAI...
 - `health` - Check API connection status
 - `clear` - Clear current session
 - `exit` or `quit` - Exit the CLI
+
+## 🤖 Working with Multiple Agents
+
+### Complete Multi-Agent Workflow
+
+Here's a complete example of setting up and using multiple specialized agents:
+
+#### Step 1: Create Different Agents with Specialized Data
+
+```bash
+# Create a technology research agent
+python ingestion/ingest.py --agent-name tech_agent --local-folder tech_docs/
+
+# Create a financial analysis agent  
+python ingestion/ingest.py --agent-name finance_agent --local-folder finance_reports/
+
+# Create a general research agent
+python ingestion/ingest.py --agent-name research_agent --local-folder academic_papers/
+```
+
+#### Step 2: Start Server for Specific Agent
+
+```bash
+# Terminal 1: Start server for tech agent
+python agent/api.py --agent-name tech_agent
+
+# The server will display:
+# 🤖 Starting Agentic RAG API Server
+# 📊 Agent: tech_agent
+# 🌐 Host: 0.0.0.0:8058
+```
+
+#### Step 3: Connect Client to the Same Agent
+
+```bash
+# Terminal 2: Connect CLI to tech agent
+python cli.py --agent-name tech_agent
+
+# The CLI will display:
+# 🤖 Agentic RAG with Knowledge Graph CLI
+# Connected to: http://localhost:8058
+# 📊 Agent: tech_agent
+```
+
+#### Step 4: Switch to Different Agent
+
+```bash
+# Stop the current server (Ctrl+C)
+# Start server for finance agent
+python agent/api.py --agent-name finance_agent
+
+# In CLI terminal, restart with finance agent
+python cli.py --agent-name finance_agent
+```
+
+### Agent Data Isolation
+
+Each agent maintains completely isolated vector stores:
+
+```bash
+# tech_agent data is stored in:
+# - agent_tech_agent_documents table
+# - agent_tech_agent_chunks table
+
+# finance_agent data is stored in:
+# - agent_finance_agent_documents table  
+# - agent_finance_agent_chunks table
+
+# main_agent data is stored in:
+# - agent_main_agent_documents table
+# - agent_main_agent_chunks table
+```
+
+### Shared Knowledge Graph
+
+All agents share the same Neo4j knowledge graph, enabling:
+- Cross-agent entity relationship queries
+- Temporal knowledge across all domains
+- Unified fact tracking regardless of which agent ingested the data
 
 ### 6. Test the System
 

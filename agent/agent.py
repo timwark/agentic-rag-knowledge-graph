@@ -39,10 +39,15 @@ logger = logging.getLogger(__name__)
 class AgentDependencies:
     """Dependencies for the agent."""
     session_id: str
+    agent_name: str = None
     user_id: Optional[str] = None
     search_preferences: Dict[str, Any] = None
     
     def __post_init__(self):
+        # Set default agent name from environment if not provided
+        if self.agent_name is None:
+            self.agent_name = os.getenv('DEFAULT_AGENT_NAME', 'main_agent')
+        
         if self.search_preferences is None:
             self.search_preferences = {
                 "use_vector": True,
@@ -85,7 +90,7 @@ async def vector_search(
         limit=limit
     )
     
-    results = await vector_search_tool(input_data)
+    results = await vector_search_tool(input_data, agent_name=ctx.deps.agent_name)
     
     # Convert results to dict for agent
     return [
@@ -163,7 +168,7 @@ async def hybrid_search(
         text_weight=text_weight
     )
     
-    results = await hybrid_search_tool(input_data)
+    results = await hybrid_search_tool(input_data, agent_name=ctx.deps.agent_name)
     
     # Convert results to dict for agent
     return [
@@ -236,7 +241,7 @@ async def list_documents(
     """
     input_data = DocumentListInput(limit=limit, offset=offset)
     
-    documents = await list_documents_tool(input_data)
+    documents = await list_documents_tool(input_data, agent_name=ctx.deps.agent_name)
     
     # Convert to dict for agent
     return [

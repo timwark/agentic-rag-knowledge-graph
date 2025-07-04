@@ -788,3 +788,84 @@ async def get_agent_stats(agent_name: str) -> Dict[str, int]:
     """
     from .schema_manager import schema_manager
     return await schema_manager.get_agent_table_counts(agent_name)
+
+
+async def list_documents_agent(
+    agent_name: str,
+    limit: int = 100,
+    offset: int = 0,
+    metadata_filter: Optional[Dict[str, Any]] = None
+) -> List[Dict[str, Any]]:
+    """
+    List documents for a specific agent with optional filtering.
+    
+    Args:
+        agent_name: Agent name
+        limit: Maximum number of documents to return
+        offset: Number of documents to skip
+        metadata_filter: Optional metadata filter
+    
+    Returns:
+        List of documents
+    """
+    from .schema_manager import schema_manager
+    
+    # Validate agent exists
+    if not await schema_manager.agent_exists(agent_name):
+        logger.warning(f"Agent {agent_name} does not exist")
+        return []
+    
+    # Get agent-specific table names
+    table_names = schema_manager.get_table_names(agent_name)
+    
+    async with db_pool.acquire() as conn:
+        query = f"""
+            SELECT 
+                d.id::text,
+                d.title,
+                d.source,
+                d.metadata,
+                d.created_at,
+                d.updated_at,
+                COUNT(c.id) AS chunk_count
+            FROM {table_names['documents']} d
+            LEFT JOIN {table_names['chunks']} c ON d.id = c.document_id
+        """
+        
+        params = []
+        conditions = []
+        
+        if metadata_filter:
+            conditions.append(f"d.metadata @> ${len(params) + 1}::jsonb")
+            params.append(json.dumps(metadata_filter))
+        
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        
+        query += f"""
+            GROUP BY d.id, d.title, d.source, d.metadata, d.created_at, d.updated_at
+            ORDER BY d.created_at DESC
+            LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}
+        """
+        
+        params.extend([limit, offset])
+        
+        try:
+            rows = await conn.fetch(query, *params)
+            
+            return [
+                {
+                    "id": row["id"],
+                    "title": row["title"],
+                    "source": row["source"],
+                    "metadata": row["metadata"],
+                    "created_at": row["created_at"].isoformat(),
+                    "updated_at": row["updated_at"].isoformat(),
+                    "chunk_count": row["chunk_count"]
+                }
+                for row in rows
+            ]
+            
+        except Exception as e:
+            logger.error(f"Error listing documents for agent {agent_name}: {e}")
+            return []

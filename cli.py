@@ -31,11 +31,12 @@ class Colors:
 class AgenticRAGCLI:
     """CLI for interacting with the Agentic RAG API."""
     
-    def __init__(self, base_url: str = "http://localhost:8058"):
-        """Initialize CLI with base URL."""
+    def __init__(self, base_url: str = "http://localhost:8058", agent_name: str = None):
+        """Initialize CLI with base URL and agent name."""
         self.base_url = base_url.rstrip('/')
         self.session_id = None
         self.user_id = "cli_user"
+        self.agent_name = agent_name or os.getenv('DEFAULT_AGENT_NAME', 'main_agent')
         
     def print_banner(self):
         """Print welcome banner."""
@@ -43,6 +44,7 @@ class AgenticRAGCLI:
         print("🤖 Agentic RAG with Knowledge Graph CLI")
         print("=" * 60)
         print(f"{Colors.WHITE}Connected to: {self.base_url}")
+        print(f"📊 Agent: {self.agent_name}")
         print(f"Type 'exit', 'quit', or Ctrl+C to exit")
         print(f"Type 'help' for commands")
         print("=" * 60 + f"{Colors.END}\n")
@@ -262,6 +264,12 @@ def main():
         help='Port number (overrides URL port)'
     )
     
+    parser.add_argument(
+        '--agent-name',
+        default=os.getenv('DEFAULT_AGENT_NAME', 'main_agent'),
+        help='Agent name to use for vector store operations (overrides .env)'
+    )
+    
     args = parser.parse_args()
     
     # Build base URL
@@ -276,7 +284,7 @@ def main():
             base_url = f"http://localhost:{args.port}"
     
     # Create and run CLI
-    cli = AgenticRAGCLI(base_url)
+    cli = AgenticRAGCLI(base_url, agent_name=args.agent_name)
     
     try:
         asyncio.run(cli.run())

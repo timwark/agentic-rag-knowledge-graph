@@ -532,7 +532,9 @@ async def search_vector(request: SearchRequest):
         )
         
         start_time = datetime.now()
-        results = await vector_search_tool(input_data)
+        # Get agent name from environment
+        agent_name = os.getenv('DEFAULT_AGENT_NAME', 'main_agent')
+        results = await vector_search_tool(input_data, agent_name=agent_name)
         end_time = datetime.now()
         
         query_time = (end_time - start_time).total_seconds() * 1000
@@ -585,7 +587,9 @@ async def search_hybrid(request: SearchRequest):
         )
         
         start_time = datetime.now()
-        results = await hybrid_search_tool(input_data)
+        # Get agent name from environment
+        agent_name = os.getenv('DEFAULT_AGENT_NAME', 'main_agent')
+        results = await hybrid_search_tool(input_data, agent_name=agent_name)
         end_time = datetime.now()
         
         query_time = (end_time - start_time).total_seconds() * 1000
@@ -610,7 +614,9 @@ async def list_documents_endpoint(
     """List documents endpoint."""
     try:
         input_data = DocumentListInput(limit=limit, offset=offset)
-        documents = await list_documents_tool(input_data)
+        # Get agent name from environment
+        agent_name = os.getenv('DEFAULT_AGENT_NAME', 'main_agent')
+        documents = await list_documents_tool(input_data, agent_name=agent_name)
         
         return {
             "documents": documents,
@@ -656,10 +662,40 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 # Development server
 if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Agentic RAG API Server")
+    parser.add_argument(
+        "--agent-name", 
+        default=os.getenv('DEFAULT_AGENT_NAME', 'main_agent'),
+        help="Agent name to use for vector store operations (overrides .env)"
+    )
+    parser.add_argument(
+        "--host", 
+        default=APP_HOST,
+        help="Host to bind the server to"
+    )
+    parser.add_argument(
+        "--port", 
+        type=int,
+        default=APP_PORT,
+        help="Port to bind the server to"
+    )
+    
+    args = parser.parse_args()
+    
+    # Override the environment variable with command line argument
+    os.environ['DEFAULT_AGENT_NAME'] = args.agent_name
+    
+    print(f"🤖 Starting Agentic RAG API Server")
+    print(f"📊 Agent: {args.agent_name}")
+    print(f"🌐 Host: {args.host}:{args.port}")
+    print(f"🔄 Reload: {APP_ENV == 'development'}")
+    
     uvicorn.run(
         "agent.api:app",
-        host=APP_HOST,
-        port=APP_PORT,
+        host=args.host,
+        port=args.port,
         reload=APP_ENV == "development",
         log_level=LOG_LEVEL.lower()
     )
